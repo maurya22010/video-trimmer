@@ -1,6 +1,6 @@
 {
   "name": "video-trimmer",
-  "version": "1.9.3",
+  "version": "1.9.14",
   "main": "./src/index.js",
   "repository": "https://github.com/mauryasoni2201/video-trimmer",
   "scripts": {
@@ -14,9 +14,7 @@
   "license": "ISC",
   "description": "Video Trimmer lets you upload a video, set trim points, and cut out unwanted parts. Download clean, high-quality clips in just a few clicks—simple, fast, and easy for everyone.",
   "dependencies": {
-    "@ffmpeg/core": "^0.11.0",
     "@ffmpeg/ffmpeg": "^0.11.6",
-    "axios": "^1.13.1",
     "filepond": "^4.31.4",
     "filepond-plugin-file-validate-type": "^1.2.9",
     "toastify-js": "^1.12.0"

@@ -89,17 +89,9 @@ new VideoTrimmer('.trimmer', 'url');
 
 ---
 
-## 🖼 Screenshots / Demo  
-
-### Upload & Add Markers  
-![Upload Video](https://portfolio-maurya-soni.vercel.app/first-photo.png)  
-
-### Preview & Trim  
-![Trim Preview](https://portfolio-maurya-soni.vercel.app/second-photo.png)  
-
-### Download Trimmed Video  
-![Download Video](https://portfolio-maurya-soni.vercel.app/third-photo.png)  
-
+## 🖼 Screenshot
+ 
+![Upload Video](https://portfolio-maurya-soni.vercel.app/_next/image?url=%2Fimages%2Fvideotrimmer-image.png&w=1080&q=75)   
 ---
 <div align="center">
   <h3>🌟 MADE WITH ❤️ BY 

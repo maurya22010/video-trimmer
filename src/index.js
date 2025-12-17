@@ -1,33 +1,96 @@
+/**
+ * Video Trimmer - A comprehensive video trimming and processing tool
+ * Supports MP4 and WebM formats with FFmpeg processing
+ */
+
 import * as FilePond from 'filepond';
 import FilePondPluginFileValidateType from 'filepond-plugin-file-validate-type';
-import { createFFmpeg, fetchFile } from '@ffmpeg/ffmpeg';
 import Toastify from 'toastify-js';
 import closeModalButton from './assets/images/closeicon.svg';
 import 'filepond/dist/filepond.min.css';
 import 'toastify-js/src/toastify.css';
 import './index.css';
+
+// Color constants for notifications and UI feedback
+const ERROR_COLOR = '#D91656';
+const SUCCESS_COLOR = '#28A745';
+
+/**
+ * Dynamically loads the FFmpeg library from CDN
+ * @returns {Promise} Resolves when FFmpeg script is loaded
+ */
+
+const loadFFmpegScript = () => {
+    return new Promise((resolve, reject) => {
+        // Check if FFmpeg is already loaded
+        if (window.FFmpeg) {
+            resolve();
+            return;
+        }
+
+        // Create and configure script element
+        const script = document.createElement('script');
+        script.src =
+            'https://unpkg.com/@ffmpeg/ffmpeg@0.11.0/dist/ffmpeg.min.js';
+        script.onload = () => resolve();
+        script.onerror = () =>
+            reject(new Error('Failed to load FFmpeg script'));
+        document.head.appendChild(script);
+    });
+};
+
+// Configure FilePond file upload library
 FilePond.registerPlugin(FilePondPluginFileValidateType);
 FilePond.setOptions({
     labelFileTypeNotAllowed: 'The file type is invalid.',
 });
 
+/**
+ * VideoTrimmer Class
+ * Main class for video trimming functionality
+ */
 export default class VideoTrimmer {
+    /**
+     * Constructor - Initializes the video trimmer
+     * @param {string} element - CSS selector for the trimmer container
+     * @param {Object} url - API endpoints for media and lesson operations
+     * @param {Object} headers - HTTP headers for API requests
+     * @param {string} siteType - Type of site ('skilltriks' or 'normal')
+     */
     constructor(element, url, headers, siteType) {
+        // Video state management
         this.videoState = {
-            link: '',
-            file: null,
+            link: '', // Blob URL for video preview
+            file: null, // Original video file object
         };
-        this.duration = 0;
-        this.element = element;
-        this.url = { ...url };
-        this.trimmedVideos = [];
-        this.sliders = [];
-        this.siteType = siteType || 'normal';
-        this.headers = headers || {};
-        this.lessonResponseData = [];
-        this.lessonResponseSend = false;
+
+        // Core properties
+        this.duration = 0; // Total video duration
+        this.element = element; // DOM selector
+        this.url = { ...url }; // API endpoints
+        this.trimmedVideos = []; // Array of processed video clips
+        this.sliders = []; // Array of time range sliders
+        this.siteType = siteType || 'normal'; // Site configuration
+        this.headers = headers || {}; // API request headers
+
+        // Lesson/upload response tracking
+        this.lessonResponseData = []; // Uploaded lesson data
+        this.lessonResponseSend = false; // Upload completion flag
+
+        // FFmpeg loading state
+        this.ffmpegScriptLoaded = false; // Script tag loaded flag
+        this.ffmpegLoaded = false; // FFmpeg core loaded flag
+        this.preloadAttempts = 0; // Track preload retry attempts
+        this.maxPreloadAttempts = 3; // Maximum retry attempts
+
+        // Initialize the UI and preload FFmpeg
         this.init();
+        this.preloadFFmpeg();
     }
+    /**
+     * Initializes the trimmer UI with modal structure
+     * Creates the main interface for video upload and trimming
+     */
     init() {
         const trimmerDiv = window.document.querySelector(`${this.element}`);
         trimmerDiv.innerHTML = `
@@ -75,8 +138,12 @@ export default class VideoTrimmer {
         this.initializeFilePond();
         document.body.classList.add('no-scroll');
         const closeButton = window.document.getElementById('closeButton');
-        closeButton.addEventListener('click', this.resetTrimmerModal);
+        closeButton.addEventListener('click', () => this.resetTrimmerModal());
     }
+    /**
+     * Initializes FilePond file upload component
+     * Handles file selection, validation, and preview generation
+     */
     initializeFilePond() {
         const modalContent =
             document.getElementsByClassName('modal-content')[0];
@@ -87,7 +154,6 @@ export default class VideoTrimmer {
             allowMultiple: false,
             acceptedFileTypes: ['video/mp4', 'video/webm'],
             maxFileSize: '1024MB',
-
             labelIdle: `
           <div class="file-upload-title"><p>Drag & Drop Video Here</p></div>
           <div class="file-upload-options"><p>or</p></div>
@@ -96,18 +162,19 @@ export default class VideoTrimmer {
             onaddfile: (_, file) => {
                 const videoFile = file.file;
                 const allowedTypes = ['video/mp4', 'video/webm'];
-
+                // Validate file type
                 if (!allowedTypes.includes(videoFile.type)) {
                     setTimeout(() => {
                         Toastify({
                             text: 'Please upload a video in either MP4 or webm format.',
                             duration: 2500,
                             stopOnFocus: true,
-                            style: { background: '#D91656' },
+                            style: { background: ERROR_COLOR },
                         }).showToast();
                     }, 500);
                     return;
                 }
+                // Validate file size (max 1GB)
                 const MAX_SIZE_IN_BYTES = 1 * 1024 * 1024 * 1024;
                 if (videoFile.size > MAX_SIZE_IN_BYTES) {
                     setTimeout(() => {
@@ -115,15 +182,105 @@ export default class VideoTrimmer {
                             text: 'Oops! The file size exceeds 1GB. Try uploading a smaller one.',
                             duration: 2500,
                             stopOnFocus: true,
-                            style: { background: '#D91656' },
+                            style: { background: ERROR_COLOR },
                         }).showToast();
                     }, 500);
                     return;
                 }
+                // Create blob URL for video preview
                 const videoUrl = URL.createObjectURL(videoFile);
                 this.videoState.link = videoUrl;
                 this.videoState.file = file.file;
+
+                // Show loading placeholder while validating video
                 modalContent.innerHTML = `
+                <div class="validating-video-container">
+                    <p>Validating video file...</p>
+                    <div class="loading"></div>
+                </div>
+                `;
+
+                // Create hidden video element to check if file is corrupted
+                const hiddenVideo = document.createElement('video');
+                hiddenVideo.src = this.videoState.link;
+                hiddenVideo.preload = 'metadata';
+                hiddenVideo.style.display = 'none';
+
+                let corruptionCheckHandled = false;
+                const corruptionTimeout = setTimeout(() => {
+                    if (corruptionCheckHandled) return;
+                    if (!hiddenVideo.duration || hiddenVideo.duration === 0) {
+                        corruptionCheckHandled = true;
+
+                        Toastify({
+                            text: 'Video file is corrupted or invalid. Please upload a valid video.',
+                            duration: 4000,
+                            stopOnFocus: true,
+                            style: { background: ERROR_COLOR },
+                        }).showToast();
+
+                        // Reset to upload state
+                        this.videoState.link = '';
+                        this.videoState.file = null;
+                        modalContent.innerHTML = `
+                        <div class="video-upload-input-form">
+                          <div class="trimmer-container">
+                            <div class="video-upload-wrapper">
+                              <input type="file" id="filepond" accept="video/mp4,video/webm" />
+                            </div>
+                          </div>
+                          <div class="video-upload-instructions">
+                            <p>Maximum upload video size: 1GB.</p>
+                            <p>Supported: .mp4, .webm</p>
+                          </div>
+                        </div>
+                        `;
+                        modalFooter.innerHTML = '';
+                        this.initializeFilePond();
+                    }
+                }, 5000);
+
+                // Error handler for corrupted files
+                hiddenVideo.onerror = () => {
+                    if (corruptionCheckHandled) return;
+                    corruptionCheckHandled = true;
+                    clearTimeout(corruptionTimeout);
+
+                    Toastify({
+                        text: 'Video file is corrupted or unreadable. Please upload a valid video.',
+                        duration: 4000,
+                        stopOnFocus: true,
+                        style: { background: ERROR_COLOR },
+                    }).showToast();
+
+                    // Reset to upload state
+                    this.videoState.link = '';
+                    this.videoState.file = null;
+                    modalContent.innerHTML = `
+                    <div class="video-upload-input-form">
+                      <div class="trimmer-container">
+                        <div class="video-upload-wrapper">
+                          <input type="file" id="filepond" accept="video/mp4,video/webm" />
+                        </div>
+                      </div>
+                      <div class="video-upload-instructions">
+                        <p>Maximum upload video size: 1GB.</p>
+                        <p>Supported: .mp4, .webm</p>
+                      </div>
+                    </div>
+                    `;
+                    modalFooter.innerHTML = '';
+                    this.initializeFilePond();
+                };
+
+                // When validation succeeds, render the trimming interface
+                hiddenVideo.onloadedmetadata = () => {
+                    if (corruptionCheckHandled) return;
+                    corruptionCheckHandled = true;
+                    clearTimeout(corruptionTimeout);
+
+                    // Render video player interface only after validation passes
+                    modalContent.innerHTML = `
               <div class="video-trimmer">
                 <div class="trimmer-container">
                   <div class="video-player">
@@ -142,41 +299,69 @@ export default class VideoTrimmer {
                 </div>
               </div>
             `;
-                const videoElement = document.querySelector('.view-video');
-                videoElement.onloadedmetadata = this.videoDetails.bind(this);
-                modalFooter.innerHTML = `<button id="trimvideo" type="button" class="modal-button">Save Trimmed Video</button>`;
-                const trimVideo = document.getElementById('trimvideo');
-                trimVideo.addEventListener('click', () => this.trimVideo());
+                    const videoElement = document.querySelector('.view-video');
+                    videoElement.onloadedmetadata =
+                        this.videoDetails.bind(this);
+                    modalFooter.innerHTML = `<button id="trimvideo" type="button" class="modal-button">Save Trimmed Video</button>`;
+                    const trimVideo = document.getElementById('trimvideo');
+                    trimVideo.addEventListener('click', () => this.trimVideo());
+                };
             },
         });
     }
+    /**
+     * Handles video metadata loading
+     * Initializes the first slider to cover full video duration
+     */
     videoDetails() {
         const video = window.document.querySelector('.view-video');
         const addButton = window.document.querySelector('#add-marker');
+
+        // Create initial slider for full video duration
         this.sliders.push({ startTime: 0, endTime: video.duration });
         this.renderSliders();
+
+        // Attach event listener for adding new clip markers
         addButton.addEventListener('click', () => this.addNewSlider());
     }
+    /**
+     * Sets lesson response status and dispatches event
+     * @param {boolean} value - Response send status
+     */
     setLessonResponseSend(value) {
         this.lessonResponseSend = value;
+        // Dispatch custom event when lessons are ready
         if (value === true) {
+            console.log('Executed');
             window.document.dispatchEvent(
                 new CustomEvent('lessonResponseReady'),
             );
         }
     }
+    /**
+     * Generates a unique color for each slider using HSL
+     * @param {number} index - Slider index
+     * @returns {string} HSLA color string
+     */
     getColor(index) {
+        // Use golden ratio for evenly distributed hue values
         const hue = (index * 137) % 360;
         const saturation = 70;
         const lightness = 50;
         const alpha = 0.8;
         return `hsla(${hue}, ${saturation}%, ${lightness}%, ${alpha})`;
     }
+    /**
+     * Renders all slider elements with draggable controls
+     * Displays clip markers on the video timeline
+     */
     renderSliders() {
         const video = window.document.querySelector('.view-video');
         const slidersContainer =
             window.document.querySelector('.sliders-container');
         slidersContainer.innerHTML = '';
+
+        // Create visual representation for each slider
         this.sliders.forEach((slider, index) => {
             const color =
                 index === 0 ? 'rgba(102,102,102,0.9)' : this.getColor(index);
@@ -245,8 +430,15 @@ export default class VideoTrimmer {
             );
         });
     }
+    /**
+     * Converts seconds to HH:MM:SS or MM:SS format
+     * @param {number} val - Time in seconds
+     * @returns {string} Formatted time string
+     */
     convertToHHMMSS(val) {
         const secNum = parseInt(val, 10);
+
+        // Calculate hours, minutes, and seconds
         let hours = Math.floor(secNum / 3600);
         let minutes = Math.floor((secNum - hours * 3600) / 60);
         let seconds = secNum - hours * 3600 - minutes * 60;
@@ -267,10 +459,18 @@ export default class VideoTrimmer {
         }
         return time;
     }
+    /**
+     * Makes slider handles draggable for adjusting clip boundaries
+     * @param {HTMLElement} grabber - The draggable handle element
+     * @param {number} sliderIndex - Index of the slider
+     * @param {boolean} isStartGrabber - True if start handle, false if end handle
+     */
     makeGrabberDraggable(grabber, sliderIndex, isStartGrabber) {
         let isDragging = false;
         const video = window.document.querySelector('.view-video');
         this.duration = video.duration;
+
+        // Add click handler for start grabber to preview clip
         if (isStartGrabber) {
             grabber.addEventListener('click', () => {
                 video.currentTime = this.sliders[sliderIndex].startTime;
@@ -316,8 +516,14 @@ export default class VideoTrimmer {
             this.renderSliders();
         };
     }
+    /**
+     * Adds a new slider by splitting the longest existing clip
+     * Creates a new clip marker in the middle of the longest segment
+     */
     addNewSlider() {
         if (this.sliders.length === 0) return;
+
+        // Find the longest slider to split
         let longestSlider = this.sliders[0];
         this.sliders.forEach((slider) => {
             if (
@@ -339,28 +545,35 @@ export default class VideoTrimmer {
         this.sliders.push(newSlider);
         this.renderSliders();
     }
+    /**
+     * Removes a slider at the specified index
+     * @param {number} index - Index of slider to remove
+     */
     removeSlider(index) {
         this.sliders = this.sliders.filter((_, i) => index !== i);
         this.renderSliders();
     }
+    /**
+     * Renders the results table showing all trimmed video clips
+     * Displays preview, name, duration, and action buttons for each clip
+     */
     renderResultsTable() {
         const modalContent =
             window.document.getElementsByClassName('modal-content')[0];
-
         let content = ``;
-
         for (let i = 0; i < this.trimmedVideos.length; i++) {
             content += `
       <tr key="${i}">
         <td class="video-preview-option">
           <video
+            id="video-${i}"
             width="100%"
             height="161px"
             src="${this.trimmedVideos[i].url}"
             controls
+            preload="metadata"
           ></video>
         </td>
-
         <td class="video-edit-name">
           <div class="edit-trimmedvideoname">
             <div class="trimmed-videoname">${this.trimmedVideos[i].name}</div>
@@ -368,7 +581,6 @@ export default class VideoTrimmer {
               <button type="button" class="editname">Edit</button>
             </div>
           </div>
-
           <div style="display:none;" class="edit-name">
             <input
               placeholder="Enter lesson name"
@@ -382,10 +594,7 @@ export default class VideoTrimmer {
             </div>
           </div>
         </td>
-
-        <!-- ⭐ Duration column – will be filled by JS -->
         <td class="duration" id="duration-${i}">Loading...</td>
-
         ${
             this.trimmedVideos.length > 1
                 ? `
@@ -401,7 +610,6 @@ export default class VideoTrimmer {
       </tr>
     `;
         }
-
         modalContent.innerHTML = `
     <div class="results-table-wrapper">
       <div class="trimmer-container">
@@ -436,76 +644,188 @@ export default class VideoTrimmer {
       </div>
     </div>
   `;
-
-        // Back button
         document
             .getElementById('backtoedit')
             .addEventListener('click', () => this.renderVideoPlayer());
-
-        // Edit & Save buttons
         document.querySelectorAll('.editname').forEach((btn, index) => {
             btn.addEventListener('click', () => this.handleUpdateName(index));
         });
-
         document.querySelectorAll('.savebutton').forEach((btn, index) => {
             btn.addEventListener('click', () => this.handleSavingName(index));
         });
-
-        // Remove buttons
         document.querySelectorAll('.removevideo').forEach((btn, index) => {
             btn.addEventListener('click', () => this.removeTrimmedVideo(index));
         });
-
-        // ⭐ Load REAL duration from video metadata
         setTimeout(() => {
-            for (let i = 0; i < this.trimmedVideos.length; i++) {
-                const vid = document.createElement('video');
-                vid.src = this.trimmedVideos[i].url;
+            let loadedCount = 0;
+            const totalVideos = this.trimmedVideos.length;
 
-                vid.onloadedmetadata = () => {
+            const finalizeIfAllLoaded = () => {
+                if (loadedCount === totalVideos) {
+                    const modalFooter =
+                        window.document.getElementsByClassName(
+                            'modal-footer',
+                        )[0];
+                    if (modalFooter) {
+                        modalFooter.innerHTML = `<button id="addlessons" type="button" class="modal-button">Submit</button>`;
+                        document
+                            .getElementById('addlessons')
+                            .addEventListener('click', async () => {
+                                const modalContent =
+                                    window.document.getElementsByClassName(
+                                        'modal-content',
+                                    )[0];
+                                modalContent.innerHTML = `
+    <div class="loader-container">
+      <p class="progress-info" id="submit-progress-text"></p>
+      <div class="progress-bar-wrapper">
+        <div class="progress-bar" id="submit-progress-bar">0%</div>
+      </div>
+      <div class="loading"></div>
+    </div>
+  `;
+                                modalFooter.innerHTML = '';
+                                if (this.siteType === 'skilltriks') {
+                                    await this.sendVideosToSkillTriks();
+                                } else {
+                                    await this.sendVideos();
+                                }
+                            });
+                    }
+                }
+            };
+
+            for (let i = 0; i < totalVideos; i++) {
+                const vid = document.getElementById(`video-${i}`);
+                if (!vid) continue;
+                const updateDuration = () => {
                     const sec = Math.floor(vid.duration);
                     const formatted = this.convertToHHMMSS(sec);
-
                     const td = document.getElementById(`duration-${i}`);
                     if (td) td.textContent = formatted;
+                    loadedCount++;
+                    finalizeIfAllLoaded();
                 };
+                vid.onloadedmetadata = updateDuration;
+                vid.oncanplay = updateDuration;
+                vid.onerror = () => {
+                    const td = document.getElementById(`duration-${i}`);
+                    if (td) td.textContent = 'Error loading';
+                    loadedCount++;
+                    finalizeIfAllLoaded();
+                };
+                vid.load();
             }
         }, 0);
     }
 
+    /**
+     * Preloads FFmpeg on initialization with retry logic
+     * Silently retries on failure without blocking the UI
+     */
+    async preloadFFmpeg() {
+        try {
+            await this.loadFFmpeg();
+            console.log('FFmpeg preloaded successfully');
+        } catch (err) {
+            this.preloadAttempts++;
+            console.warn(
+                `FFmpeg preload attempt ${this.preloadAttempts} failed:`,
+                err.message,
+            );
+
+            // Retry with exponential backoff
+            if (this.preloadAttempts < this.maxPreloadAttempts) {
+                const retryDelay = Math.min(
+                    1000 * Math.pow(2, this.preloadAttempts - 1),
+                    5000,
+                );
+                console.log(`Retrying in ${retryDelay}ms...`);
+                setTimeout(() => this.preloadFFmpeg(), retryDelay);
+            } else {
+                console.warn(
+                    'FFmpeg preload failed after max attempts. Will load on-demand when needed.',
+                );
+            }
+        }
+    }
+
+    /**
+     * Loads FFmpeg library (script and core)
+     * Only loads once to avoid redundant loading
+     * @returns {Promise} Resolves when FFmpeg is ready
+     */
     async loadFFmpeg() {
+        // Return immediately if already loaded
+        if (this.ffmpegLoaded && this.ffmpeg && this.ffmpeg.isLoaded()) {
+            return;
+        }
+
+        // Load FFmpeg script from CDN
+        if (!this.ffmpegScriptLoaded) {
+            try {
+                await loadFFmpegScript();
+                this.ffmpegScriptLoaded = true;
+            } catch (err) {
+                const errorMsg =
+                    'Failed to load FFmpeg library from CDN. Please check your internet connection and try again.';
+                console.error(errorMsg, err);
+                throw new Error(errorMsg);
+            }
+        }
+        if (!window.FFmpeg || !window.FFmpeg.createFFmpeg) {
+            const errorMsg =
+                'FFmpeg library failed to initialize. Please refresh the page and try again.';
+            console.error(errorMsg);
+            throw new Error(errorMsg);
+        }
         if (!this.ffmpeg) {
+            const { createFFmpeg } = window.FFmpeg;
             this.ffmpeg = createFFmpeg({
                 log: false,
+                corePath:
+                    'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
             });
         }
         if (!this.ffmpeg.isLoaded()) {
             await this.ffmpeg.load();
+            this.ffmpegLoaded = true;
         }
     }
+    /**
+     * Main video trimming function
+     * Processes video clips using FFmpeg and creates trimmed segments
+     * @returns {Promise} Resolves when all clips are processed
+     */
     async trimVideo() {
         try {
-            const videoFile = this.videoState.file;
-
-            let fileBuffer;
-            try {
-                fileBuffer = await fetchFile(videoFile);
-            } catch (err) {
-                console.error('File read error:', err);
+            // Validate video file exists
+            if (!this.videoState.file) {
                 Toastify({
-                    text: 'Please try again. The selected video was deleted from your device. Please re-upload.',
+                    text: 'No video file selected. Please upload a video first.',
                     duration: 4000,
                     stopOnFocus: true,
-                    style: { background: '#D91656' },
+                    style: { background: ERROR_COLOR },
                 }).showToast();
-
-                this.resetTrimmerModal();
                 return;
             }
+            if (!this.sliders || this.sliders.length === 0) {
+                Toastify({
+                    text: 'No clips selected. Please add at least one clip marker.',
+                    duration: 4000,
+                    stopOnFocus: true,
+                    style: { background: ERROR_COLOR },
+                }).showToast();
+                return;
+            }
+            const videoFile = this.videoState.file;
             const modalContent =
                 document.getElementsByClassName('modal-content')[0];
             const modalFooter =
                 document.getElementsByClassName('modal-footer')[0];
+            if (!modalContent || !modalFooter) {
+                throw new Error('Modal elements not found');
+            }
             modalContent.innerHTML = `
             <div class="loader-container">
                 <p class="progress-info" id="trim-progress-text"></p>
@@ -516,125 +836,248 @@ export default class VideoTrimmer {
             </div>
         `;
             modalFooter.innerHTML = '';
+            // Ensure FFmpeg is loaded before processing
+            try {
+                await this.loadFFmpeg();
+            } catch (err) {
+                console.error('FFmpeg loading error:', err);
+                Toastify({
+                    text: 'Failed to load video processing library. Please check your internet connection and try again.',
+                    duration: 5000,
+                    stopOnFocus: true,
+                    style: { background: ERROR_COLOR },
+                }).showToast();
 
-            await this.loadFFmpeg();
+                // Reset UI to allow retry
+                const loadingSpinner = document.querySelector('.loading');
+                if (loadingSpinner) loadingSpinner.remove();
+                modalContent.innerHTML = `
+                    <div class="error-container" style="text-align: center; padding: 20px;">
+                        <p style="margin-bottom: 15px;">Unable to load video processing library.</p>
+                        <button type="button" id="retry-ffmpeg" style="padding: 10px 20px; cursor: pointer;">
+                            Retry Loading
+                        </button>
+                    </div>
+                `;
+
+                document
+                    .getElementById('retry-ffmpeg')
+                    ?.addEventListener('click', () => {
+                        this.trimVideo();
+                    });
+                return;
+            }
+            let fileBuffer;
+            try {
+                const { fetchFile } = window.FFmpeg;
+                fileBuffer = await fetchFile(videoFile);
+            } catch (err) {
+                console.error('File read error:', err);
+                Toastify({
+                    text: 'Cannot access the video file. It may have been deleted or moved. Please re-upload.',
+                    duration: 4000,
+                    stopOnFocus: true,
+                    style: { background: ERROR_COLOR },
+                }).showToast();
+                this.resetTrimmerModal();
+                return;
+            }
             const videoFormat = this.videoState.file.type.split('/')[1];
+            if (
+                !videoFormat ||
+                (videoFormat !== 'mp4' && videoFormat !== 'webm')
+            ) {
+                Toastify({
+                    text: 'Unsupported video format. Please use MP4 or WebM.',
+                    duration: 4000,
+                    stopOnFocus: true,
+                    style: { background: ERROR_COLOR },
+                }).showToast();
+                this.resetTrimmerModal();
+                return;
+            }
             const accurateSliders = this.sliders.map((element) => ({
                 startTime: parseInt(element.startTime),
                 endTime: parseInt(element.endTime),
             }));
+            for (let i = 0; i < accurateSliders.length; i++) {
+                const { startTime, endTime } = accurateSliders[i];
+                if (startTime >= endTime) {
+                    Toastify({
+                        text: `Invalid clip ${
+                            i + 1
+                        }: Start time must be before end time.`,
+                        duration: 4000,
+                        stopOnFocus: true,
+                        style: { background: ERROR_COLOR },
+                    }).showToast();
+                    this.renderVideoPlayer();
+                    return;
+                }
+            }
             this.totalClips = accurateSliders.length;
             this.trimmedVideos = [];
-
             const progressBar = document.getElementById('trim-progress-bar');
             const progressText = document.getElementById('trim-progress-text');
             let currentTotalPercentage = 0;
-
             progressBar.style.width = '0%';
             progressBar.textContent = '0%';
             progressText.textContent = `Overall Progress: 0 of ${this.totalClips} - 0%`;
 
             for (let i = 0; i < accurateSliders.length; i++) {
-                const { startTime, endTime } = accurateSliders[i];
-                const duration = endTime - startTime;
-                this.currentClipIndex = i + 1;
-                progressText.textContent = `Processing Clip: ${this.currentClipIndex} of ${this.totalClips}...`;
+                try {
+                    const { startTime, endTime } = accurateSliders[i];
+                    const duration = endTime - startTime;
+                    this.currentClipIndex = i + 1;
+                    progressText.textContent = `Processing Clip: ${this.currentClipIndex} of ${this.totalClips}...`;
+                    const inputFileName = `input_${i + 1}.${videoFormat}`;
+                    try {
+                        const { fetchFile } = window.FFmpeg;
+                        await this.ffmpeg.FS(
+                            'writeFile',
+                            inputFileName,
+                            await fetchFile(this.videoState.file),
+                        );
+                    } catch (err) {
+                        throw new Error(
+                            `Failed to prepare video file for clip ${i + 1}`,
+                        );
+                    }
+                    const trimmedVideoName = `video_${i + 1}.${videoFormat}`;
+                    try {
+                        if (videoFormat === 'webm') {
+                            await this.ffmpeg.run(
+                                '-i',
+                                inputFileName,
+                                '-ss',
+                                `${startTime}`,
+                                '-to',
+                                `${endTime}`,
+                                '-c',
+                                'copy',
+                                '-avoid_negative_ts',
+                                'make_zero',
+                                trimmedVideoName,
+                            );
+                        } else {
+                            await this.ffmpeg.run(
+                                '-ss',
+                                `${startTime}`,
+                                '-i',
+                                inputFileName,
+                                '-t',
+                                `${duration}`,
+                                '-c',
+                                'copy',
+                                trimmedVideoName,
+                            );
+                        }
+                    } catch (err) {
+                        throw new Error(
+                            `Failed to trim clip ${
+                                i + 1
+                            }. The video segment may be corrupted.`,
+                        );
+                    }
 
-                // console.log(
-                //   `[FFmpeg] Starting trim for Clip ${this.currentClipIndex}/${
-                //     this.totalClips
-                //   } (Duration: ${duration.toFixed(2)}s)`
-                // );
-                const inputFileName = `input_${i + 1}.${videoFormat}`;
-                await this.ffmpeg.FS(
-                    'writeFile',
-                    inputFileName,
-                    await fetchFile(this.videoState.file),
-                );
-                const trimmedVideoName = `video_${i + 1}.${videoFormat}`;
-                await this.ffmpeg.run(
-                    '-ss',
-                    `${startTime}`,
-                    '-i',
-                    inputFileName,
-                    '-t',
-                    `${duration}`,
-                    '-c',
-                    'copy',
-                    trimmedVideoName,
-                );
-                const clipsCompleted = i + 1;
-                currentTotalPercentage = Math.floor(
-                    (clipsCompleted / this.totalClips) * 100,
-                );
+                    const clipsCompleted = i + 1;
+                    currentTotalPercentage = Math.floor(
+                        (clipsCompleted / this.totalClips) * 100,
+                    );
 
-                progressBar.style.width = `${currentTotalPercentage}%`;
-                progressBar.textContent = `${currentTotalPercentage}%`;
-                progressText.textContent = `Overall Progress: ${clipsCompleted} of ${this.totalClips} - ${currentTotalPercentage}%`;
+                    progressBar.style.width = `${currentTotalPercentage}%`;
+                    progressBar.textContent = `${currentTotalPercentage}%`;
+                    progressText.textContent = `Overall Progress: ${clipsCompleted} of ${this.totalClips} - ${currentTotalPercentage}%`;
+                    let trimmedVideoData;
+                    try {
+                        trimmedVideoData = this.ffmpeg.FS(
+                            'readFile',
+                            trimmedVideoName,
+                        );
+                    } catch (err) {
+                        throw new Error(
+                            `Failed to read processed clip ${i + 1}`,
+                        );
+                    }
 
-                // console.log(
-                //   `[FFmpeg Progress] Total Progress: ${currentTotalPercentage}% (Clip ${clipsCompleted} finished)`
-                // );
-                const trimmedVideoData = this.ffmpeg.FS(
-                    'readFile',
-                    trimmedVideoName,
-                );
-                const trimmedBlob = new Blob([trimmedVideoData.buffer], {
-                    type: this.videoState.file.type,
-                });
-                const trimmedFile = new File(
-                    [trimmedBlob],
-                    `video_${i + 1}.${videoFormat}`,
-                    { type: this.videoState.file.type },
-                );
-                const videoUrl = URL.createObjectURL(trimmedBlob);
-                this.trimmedVideos.push({
-                    name:
-                        this.siteType === 'skilltriks'
-                            ? `lesson${i + 1}`
-                            : `video${i + 1}`,
-                    url: videoUrl,
-                    file: trimmedFile,
-                    duration: this.convertToHHMMSS(duration),
-                    type: this.videoState.file.type,
-                });
+                    if (!trimmedVideoData || trimmedVideoData.length === 0) {
+                        throw new Error(`Clip ${i + 1} is empty or corrupted`);
+                    }
+
+                    const trimmedBlob = new Blob([trimmedVideoData.buffer], {
+                        type: this.videoState.file.type,
+                    });
+                    const trimmedFile = new File(
+                        [trimmedBlob],
+                        `video_${i + 1}.${videoFormat}`,
+                        { type: this.videoState.file.type },
+                    );
+                    const videoUrl = URL.createObjectURL(trimmedBlob);
+
+                    this.trimmedVideos.push({
+                        name:
+                            this.siteType === 'skilltriks'
+                                ? `lesson${i + 1}`
+                                : `video${i + 1}`,
+                        url: videoUrl,
+                        file: trimmedFile,
+                        duration: this.convertToHHMMSS(duration),
+                        type: this.videoState.file.type,
+                    });
+                    try {
+                        this.ffmpeg.FS('unlink', inputFileName);
+                        this.ffmpeg.FS('unlink', trimmedVideoName);
+                    } catch (err) {
+                        console.warn(
+                            `Failed to clean up temporary files for clip ${
+                                i + 1
+                            }:`,
+                            err,
+                        );
+                    }
+                } catch (clipError) {
+                    console.error(`Error processing clip ${i + 1}:`, clipError);
+                    Toastify({
+                        text:
+                            clipError.message ||
+                            `Failed to process clip ${
+                                i + 1
+                            }. Please try again.`,
+                        duration: 4000,
+                        stopOnFocus: true,
+                        style: { background: ERROR_COLOR },
+                    }).showToast();
+                    this.renderVideoPlayer();
+                    return;
+                }
             }
             progressBar.style.width = '100%';
             progressBar.textContent = '100%';
             progressText.textContent = `Processing Complete! All ${this.totalClips} clips finished.`;
+            const loadingSpinner = document.querySelector('.loading');
+            if (loadingSpinner) {
+                loadingSpinner.style.display = 'none';
+            }
 
             this.renderResultsTable();
-            modalFooter.innerHTML = `<button id="addlessons" type="button" class="modal-button">Submit</button>`;
-            document
-                .getElementById('addlessons')
-                .addEventListener('click', async () => {
-                    modalContent.innerHTML = `
-    <div class="loader-container">
-      <p class="progress-info" id="submit-progress-text"></p>
-      <div class="progress-bar-wrapper">
-        <div class="progress-bar" id="submit-progress-bar">0%</div>
-      </div>
-      <div class="loading"></div>
-    </div>
-  `;
-                    modalFooter.innerHTML = '';
-
-                    if (this.siteType === 'skilltriks') {
-                        await this.sendVideosToSkillTriks();
-                    } else {
-                        await this.sendVideos(); // your normal site method
-                    }
-                });
         } catch (error) {
+            console.error('Unexpected error in trimVideo:', error);
+            const errorMessage =
+                error.message ||
+                'An unexpected error occurred during video processing.';
             Toastify({
-                text: 'Please try again. The selected video was deleted or cannot be read.',
+                text: `${errorMessage} Please try again.`,
                 duration: 4000,
                 stopOnFocus: true,
-                style: { background: '#D91656' },
+                style: { background: ERROR_COLOR },
             }).showToast();
             this.resetTrimmerModal();
         }
     }
+    /**
+     * Renders the video player view for editing clip markers
+     * Allows users to adjust trim points before final processing
+     */
     renderVideoPlayer() {
         const modalContent =
             window.document.getElementsByClassName('modal-content')[0];
@@ -675,151 +1118,165 @@ export default class VideoTrimmer {
             this.renderSliders();
         });
     }
+    /**
+     * Uploads trimmed videos to SkillTriks platform
+     * Creates media entries and lesson records via API
+     * @returns {Promise} Resolves with upload results
+     */
     async sendVideosToSkillTriks() {
-        try {
-            const submitProgressBar = document.getElementById(
-                'submit-progress-bar',
-            );
-            const submitProgressText = document.getElementById(
-                'submit-progress-text',
-            );
+        const submitProgressBar = document.getElementById(
+            'submit-progress-bar',
+        );
+        const submitProgressText = document.getElementById(
+            'submit-progress-text',
+        );
 
-            const total = this.trimmedVideos.length;
-            let completed = 0;
+        const total = this.trimmedVideos.length;
+        let completed = 0;
+        const results = [];
 
-            // 🔹 Init progress UI
-            if (submitProgressBar && submitProgressText) {
-                submitProgressBar.style.width = '0%';
-                submitProgressBar.textContent = '0%';
-                submitProgressText.textContent = `Uploading 0 of ${total} - 0%`;
-            }
+        if (submitProgressBar && submitProgressText) {
+            submitProgressBar.style.width = '0%';
+            submitProgressBar.textContent = '0%';
+            submitProgressText.textContent = `Uploading 0 of ${total}`;
+        }
 
-            const uploads = this.trimmedVideos.map(async (video, index) => {
-                const fileExtension = video.type.split('/')[1] || 'mp4';
-                const fileName = `${
-                    video.name || `trimmed-${index + 1}`
-                }.${fileExtension}`;
-
-                // 1️⃣ Upload media
-                const formData = new FormData();
-                formData.append('file', video.file, fileName);
-
-                const mediaResponse = await fetch(this.url.media, {
-                    method: 'POST',
-                    headers: this.headers,
-                    body: formData,
-                });
-
-                const mediaData = await mediaResponse.json();
-                if (!mediaResponse.ok) {
-                    throw new Error(
-                        mediaData?.message || 'Failed to upload video.',
-                    );
-                }
-
-                const videoId = mediaData?.id || mediaData?.video_id;
-                const title = mediaData?.title?.raw;
-
-                if (!videoId)
-                    throw new Error('No video_id returned from media API.');
-                if (!title)
-                    throw new Error('No title found in media response.');
-
-                // 2️⃣ Create lesson (+ course attach)
-                const lessonPayload = {
-                    title,
-                    status: 'publish',
-                    meta: {
-                        _stlms_lesson_media: {
-                            media_type: 'video',
-                            video_id: videoId,
-                        },
-                        _stlms_lesson_settings:
-                            this.calculateLessonTimeDuration(video.duration),
-                        ...(this.url.courseId && {
-                            _stlms_lesson_course: Number(this.url.courseId),
-                        }),
-                    },
-                };
-
-                const lessonResponse = await fetch(this.url.lesson, {
-                    method: 'POST',
-                    headers: {
-                        ...this.headers,
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(lessonPayload),
-                });
-
-                const lessonData = await lessonResponse.json();
-                if (!lessonResponse.ok) {
-                    throw new Error(
-                        lessonData?.message || 'Failed to create lesson.',
-                    );
-                }
-
-                const item = {
-                    id: lessonData.id,
-                    name: lessonData.title?.rendered || lessonData.title,
-                };
-
-                this.lessonResponseData.push(item);
-                // console.log("Uploaded:", item);
-
-                completed++;
-                const percent = Math.floor((completed / total) * 100);
-
+        const uploadNext = (index) => {
+            if (index >= total) {
                 if (submitProgressBar && submitProgressText) {
-                    submitProgressBar.style.width = `${percent}%`;
-                    submitProgressBar.textContent = `${percent}%`;
-                    submitProgressText.textContent = `Uploading ${completed} of ${total} - ${percent}%`;
+                    submitProgressBar.style.width = '100%';
+                    submitProgressBar.textContent = '100%';
+                    submitProgressText.textContent = 'All uploads completed!';
                 }
 
-                return { media: mediaData, lesson: lessonData };
-            });
+                const spinner = document.querySelector('.loading');
+                if (spinner) spinner.style.display = 'none';
 
-            // 4️⃣ Wait for all uploads to finish
-            const results = await Promise.all(uploads);
+                this.setLessonResponseSend(true);
 
-            // Ensure final 100%
-            if (submitProgressBar && submitProgressText) {
-                submitProgressBar.style.width = '100%';
-                submitProgressBar.textContent = '100%';
-                submitProgressText.textContent = 'All uploads completed!';
+                Toastify({
+                    text:
+                        results.length > 1
+                            ? `${results.length} lessons have been created successfully!`
+                            : 'Your lesson has been created successfully!',
+                    duration: 4000,
+                    style: { background: SUCCESS_COLOR },
+                }).showToast();
+
+                setTimeout(() => this.resetTrimmerModal(), 800);
+                return Promise.resolve(results);
             }
 
-            const spinner = document.querySelector('.loading');
-            if (spinner) spinner.style.display = 'none';
+            const video = this.trimmedVideos[index];
+            const fileExtension = video.type.split('/')[1] || 'mp4';
+            const fileName = `${
+                video.name || `trimmed-${index + 1}`
+            }.${fileExtension}`;
 
-            this.setLessonResponseSend(true);
+            const formData = new FormData();
+            formData.append('file', video.file, fileName);
 
-            const message =
-                results.length > 1
-                    ? `${results.length} lessons have been created successfully!`
-                    : 'Your lesson has been created successfully!';
+            return fetch(this.url.media, {
+                method: 'POST',
+                headers: this.headers,
+                body: formData,
+            })
+                .then((res) =>
+                    res.json().then((data) => {
+                        if (!res.ok) {
+                            throw new Error(
+                                data?.message || 'Failed to upload video.',
+                            );
+                        }
+                        return data;
+                    }),
+                )
+                .then((mediaData) => {
+                    const videoId = mediaData?.id || mediaData?.video_id;
+                    const title = mediaData?.title?.raw;
 
-            Toastify({
-                text: message,
-                duration: 4000,
-                style: { background: '#28A745' },
-            }).showToast();
+                    if (!videoId)
+                        throw new Error('No video_id returned from media API.');
+                    if (!title)
+                        throw new Error('No title found in media response.');
 
-            setTimeout(() => this.resetTrimmerModal(), 800);
+                    const lessonPayload = {
+                        title,
+                        status: 'publish',
+                        meta: {
+                            _stlms_lesson_media: {
+                                media_type: 'video',
+                                video_id: videoId,
+                            },
+                            _stlms_lesson_settings:
+                                this.calculateLessonTimeDuration(
+                                    video.duration,
+                                ),
+                            ...(this.url.courseId && {
+                                _stlms_lesson_course: Number(this.url.courseId),
+                            }),
+                        },
+                    };
 
-            return results;
-        } catch (error) {
+                    return fetch(this.url.lesson, {
+                        method: 'POST',
+                        headers: {
+                            ...this.headers,
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(lessonPayload),
+                    }).then((res) =>
+                        res.json().then((data) => {
+                            if (!res.ok) {
+                                throw new Error(
+                                    data?.message || 'Failed to create lesson.',
+                                );
+                            }
+                            return { mediaData, lessonData: data };
+                        }),
+                    );
+                })
+                .then(({ mediaData, lessonData }) => {
+                    const item = {
+                        id: lessonData.id,
+                        name: lessonData.title?.rendered || lessonData.title,
+                    };
+
+                    this.lessonResponseData.push(item);
+                    results.push({ media: mediaData, lesson: lessonData });
+
+                    completed++;
+                    const percent = Math.floor((completed / total) * 100);
+
+                    if (submitProgressBar && submitProgressText) {
+                        submitProgressBar.style.width = `${percent}%`;
+                        submitProgressBar.textContent = `${percent}%`;
+                        submitProgressText.textContent = `Uploading ${completed} of ${total}`;
+                    }
+
+                    return uploadNext(index + 1);
+                });
+        };
+
+        return uploadNext(0).catch((error) => {
             console.error('Error uploading videos/lessons:', error);
 
             Toastify({
                 text: error.message || 'Something went wrong while uploading.',
                 duration: 4000,
-                style: { background: '#D91656' },
+                style: { background: ERROR_COLOR },
             }).showToast();
 
             this.resetTrimmerModal();
-        }
+            return Promise.reject(error);
+        });
     }
 
+    /**
+     * Uploads trimmed videos to generic endpoint
+     * Sends all video files as FormData
+     * @returns {Promise} Resolves when upload completes
+     */
     async sendVideos() {
         try {
             const modalContent =
@@ -868,18 +1325,26 @@ export default class VideoTrimmer {
                 gravity: 'top',
                 position: 'right',
                 style: {
-                    background: '#D91656',
+                    background: ERROR_COLOR,
                     color: '#fff',
                 },
             }).showToast();
             this.resetTrimmerModal();
         }
     }
+    /**
+     * Removes a trimmed video from the results
+     * @param {number} index - Index of video to remove
+     */
     removeTrimmedVideo(index) {
         this.trimmedVideos = this.trimmedVideos.filter((_, i) => index !== i);
         this.sliders = this.sliders.filter((_, i) => index !== i);
         this.renderResultsTable();
     }
+    /**
+     * Shows the name edit form for a trimmed video
+     * @param {number} index - Index of video to edit
+     */
     handleUpdateName(index) {
         const editName = window.document.getElementsByClassName(
             'edit-trimmedvideoname',
@@ -889,6 +1354,10 @@ export default class VideoTrimmer {
         editName.style.display = 'none';
         openForm.style.display = 'flex';
     }
+    /**
+     * Saves the updated name for a trimmed video
+     * @param {number} index - Index of video to update
+     */
     handleSavingName(index) {
         const editName = document.getElementsByClassName(
             'edit-trimmedvideoname',
@@ -898,12 +1367,14 @@ export default class VideoTrimmer {
         const inputValue = document.getElementsByClassName(
             'update-trimmed-video-name',
         )[index];
+
+        // Validate name is not empty
         if (inputValue.value === '') {
             Toastify({
                 text: 'Please enter a valid video name.',
                 duration: 2500,
                 stopOnFocus: true,
-                style: { background: '#D91656' },
+                style: { background: ERROR_COLOR },
             }).showToast();
             return;
         }
@@ -912,9 +1383,17 @@ export default class VideoTrimmer {
         editName.style.display = 'block';
         openForm.style.display = 'none';
     }
+    /**
+     * Calculates lesson duration from HH:MM:SS or MM:SS format
+     * Converts to hour or minute duration type for API
+     * @param {string} timeString - Time in HH:MM:SS or MM:SS format
+     * @returns {Object} Duration object with value and type
+     */
     calculateLessonTimeDuration(timeString) {
         const parts = timeString.split(':').map(Number);
         let totalSeconds = 0;
+
+        // Parse MM:SS format
         if (parts.length === 2) {
             const [minutes, seconds] = parts;
             totalSeconds = minutes * 60 + seconds;
@@ -937,16 +1416,25 @@ export default class VideoTrimmer {
             duration_type: 'minute',
         };
     }
+    /**
+     * Resets the trimmer modal to initial state
+     * Clears all data and hides the modal
+     */
     resetTrimmerModal() {
         const trimmerModal = document.querySelector('.trimmer-modal');
         const backDrop = document.getElementById('backdrop');
+
+        // Hide modal UI
         trimmerModal?.classList.add('hide-content');
         backDrop?.classList.add('hide-content');
+
+        // Clear all state
         this.trimmedVideos = [];
         this.sliders = [];
         this.setLessonResponseSend(false);
         this.lessonResponseData = [];
         this.videoState = { file: null, link: null };
+        // Re-enable scrolling
         document.body.classList.remove('no-scroll');
     }
 }
