@@ -1,6 +1,6 @@
 {
   "name": "video-trimmer",
-  "version": "1.9.14",
+  "version": "1.9.16",
   "main": "./src/index.js",
   "repository": "https://github.com/mauryasoni2201/video-trimmer",
   "scripts": {

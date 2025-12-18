@@ -436,29 +436,21 @@ export default class VideoTrimmer {
      * @returns {string} Formatted time string
      */
     convertToHHMMSS(val) {
-        const secNum = parseInt(val, 10);
+        const secNum = Math.round(Number(val));
 
-        // Calculate hours, minutes, and seconds
         let hours = Math.floor(secNum / 3600);
-        let minutes = Math.floor((secNum - hours * 3600) / 60);
-        let seconds = secNum - hours * 3600 - minutes * 60;
-        if (hours < 10) {
-            hours = '0' + hours;
-        }
-        if (minutes < 10) {
-            minutes = '0' + minutes;
-        }
-        if (seconds < 10) {
-            seconds = '0' + seconds;
-        }
-        let time;
-        if (hours === '00') {
-            time = minutes + ':' + seconds;
-        } else {
-            time = hours + ':' + minutes + ':' + seconds;
-        }
-        return time;
+        let minutes = Math.floor((secNum % 3600) / 60);
+        let seconds = secNum % 60;
+
+        if (hours < 10) hours = '0' + hours;
+        if (minutes < 10) minutes = '0' + minutes;
+        if (seconds < 10) seconds = '0' + seconds;
+
+        return hours === '00'
+            ? `${minutes}:${seconds}`
+            : `${hours}:${minutes}:${seconds}`;
     }
+
     /**
      * Makes slider handles draggable for adjusting clip boundaries
      * @param {HTMLElement} grabber - The draggable handle element
@@ -625,7 +617,6 @@ export default class VideoTrimmer {
             <button type="button" id="backtoedit">Back To Edit</button>
           </div>
         </div>
-
         <table id="results">
           <thead>
             <tr>
@@ -637,9 +628,7 @@ export default class VideoTrimmer {
               ${this.trimmedVideos.length > 1 ? '<th>Options</th>' : ''}
             </tr>
           </thead>
-          <tbody>
-            ${content}
-          </tbody>
+          <tbody>${content}</tbody>
         </table>
       </div>
     </div>
@@ -656,67 +645,67 @@ export default class VideoTrimmer {
         document.querySelectorAll('.removevideo').forEach((btn, index) => {
             btn.addEventListener('click', () => this.removeTrimmedVideo(index));
         });
-        setTimeout(() => {
-            let loadedCount = 0;
-            const totalVideos = this.trimmedVideos.length;
-
-            const finalizeIfAllLoaded = () => {
-                if (loadedCount === totalVideos) {
-                    const modalFooter =
-                        window.document.getElementsByClassName(
-                            'modal-footer',
-                        )[0];
-                    if (modalFooter) {
-                        modalFooter.innerHTML = `<button id="addlessons" type="button" class="modal-button">Submit</button>`;
-                        document
-                            .getElementById('addlessons')
-                            .addEventListener('click', async () => {
-                                const modalContent =
-                                    window.document.getElementsByClassName(
-                                        'modal-content',
-                                    )[0];
-                                modalContent.innerHTML = `
-    <div class="loader-container">
-      <p class="progress-info" id="submit-progress-text"></p>
-      <div class="progress-bar-wrapper">
-        <div class="progress-bar" id="submit-progress-bar">0%</div>
-      </div>
-      <div class="loading"></div>
-    </div>
-  `;
-                                modalFooter.innerHTML = '';
-                                if (this.siteType === 'skilltriks') {
-                                    await this.sendVideosToSkillTriks();
-                                } else {
-                                    await this.sendVideos();
-                                }
-                            });
+        let hasError = false;
+        let loadedCount = 0;
+        const totalVideos = this.trimmedVideos.length;
+        const modalFooter = document.getElementsByClassName('modal-footer')[0];
+        if (modalFooter) modalFooter.innerHTML = '';
+        const finalize = () => {
+            if (loadedCount !== totalVideos) return;
+            if (hasError) return;
+            modalFooter.innerHTML = `
+      <button id="addlessons" type="button" class="modal-button">
+        Submit
+      </button>
+    `;
+            document
+                .getElementById('addlessons')
+                .addEventListener('click', async (e) => {
+                    if (hasError) {
+                        e.preventDefault();
+                        return;
                     }
+                    modalContent.innerHTML = `
+          <div class="loader-container">
+            <p class="progress-info" id="submit-progress-text"></p>
+            <div class="progress-bar-wrapper">
+              <div class="progress-bar" id="submit-progress-bar">0%</div>
+            </div>
+            <div class="loading"></div>
+          </div>
+        `;
+                    modalFooter.innerHTML = '';
+                    if (this.siteType === 'skilltriks') {
+                        await this.sendVideosToSkillTriks();
+                    } else {
+                        await this.sendVideos();
+                    }
+                });
+        };
+        for (let i = 0; i < totalVideos; i++) {
+            const vid = document.getElementById(`video-${i}`);
+            if (!vid) continue;
+            const success = () => {
+                if (!Number.isFinite(vid.duration)) return;
+                const td = document.getElementById(`duration-${i}`);
+                if (td) {
+                    td.textContent = this.convertToHHMMSS(vid.duration);
                 }
+                loadedCount++;
+                finalize();
             };
-
-            for (let i = 0; i < totalVideos; i++) {
-                const vid = document.getElementById(`video-${i}`);
-                if (!vid) continue;
-                const updateDuration = () => {
-                    const sec = Math.floor(vid.duration);
-                    const formatted = this.convertToHHMMSS(sec);
-                    const td = document.getElementById(`duration-${i}`);
-                    if (td) td.textContent = formatted;
-                    loadedCount++;
-                    finalizeIfAllLoaded();
-                };
-                vid.onloadedmetadata = updateDuration;
-                vid.oncanplay = updateDuration;
-                vid.onerror = () => {
-                    const td = document.getElementById(`duration-${i}`);
-                    if (td) td.textContent = 'Error loading';
-                    loadedCount++;
-                    finalizeIfAllLoaded();
-                };
-                vid.load();
-            }
-        }, 0);
+            vid.onloadedmetadata = success;
+            vid.oncanplay = success;
+            vid.onerror = () => {
+                hasError = true;
+                const td = document.getElementById(`duration-${i}`);
+                if (td) td.textContent = 'Error loading';
+                if (modalFooter) modalFooter.innerHTML = '';
+                loadedCount++;
+                finalize();
+            };
+            vid.load();
+        }
     }
 
     /**
@@ -726,14 +715,12 @@ export default class VideoTrimmer {
     async preloadFFmpeg() {
         try {
             await this.loadFFmpeg();
-            console.log('FFmpeg preloaded successfully');
         } catch (err) {
             this.preloadAttempts++;
             console.warn(
                 `FFmpeg preload attempt ${this.preloadAttempts} failed:`,
                 err.message,
             );
-
             // Retry with exponential backoff
             if (this.preloadAttempts < this.maxPreloadAttempts) {
                 const retryDelay = Math.min(
@@ -769,7 +756,7 @@ export default class VideoTrimmer {
             } catch (err) {
                 const errorMsg =
                     'Failed to load FFmpeg library from CDN. Please check your internet connection and try again.';
-                console.error(errorMsg, err);
+                console.error(errorMsg);
                 throw new Error(errorMsg);
             }
         }
@@ -1258,17 +1245,16 @@ export default class VideoTrimmer {
                 });
         };
 
-        return uploadNext(0).catch((error) => {
-            console.error('Error uploading videos/lessons:', error);
-
+        return uploadNext(0).catch(() => {
             Toastify({
-                text: error.message || 'Something went wrong while uploading.',
+                text: 'Something went wrong while uploading. Please try again later.',
                 duration: 4000,
+                close: true,
+                stopOnFocus: true,
                 style: { background: ERROR_COLOR },
             }).showToast();
-
             this.resetTrimmerModal();
-            return Promise.reject(error);
+            return Promise.reject();
         });
     }
 
@@ -1416,6 +1402,7 @@ export default class VideoTrimmer {
             duration_type: 'minute',
         };
     }
+    /*reset trimmer: it reset all data and hide modal*/
     /**
      * Resets the trimmer modal to initial state
      * Clears all data and hides the modal
